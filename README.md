@@ -3,6 +3,15 @@
 Playable multiplayer-friendly prototype with a generated map, five mixed waves,
 ground and flying enemies, four tower classes, cash rewards, and base health.
 
+## Co-op multiplayer
+
+- Supports 1–4 active players per match with a Ready lobby and countdown.
+- Enemy health and count scale with the number of participating players.
+- Cash, tower limits, damage, and kill statistics are tracked per player.
+- Enemy rewards are split proportionally by damage dealt.
+- Only a tower's owner can upgrade or sell it; each player may place 15 towers.
+- Players joining during a match wait for the next round.
+
 ## Getting started
 
 ```bash

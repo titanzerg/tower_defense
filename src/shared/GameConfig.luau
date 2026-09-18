@@ -4,6 +4,14 @@ GameConfig.StartingCash = 650
 GameConfig.BaseHealth = 20
 GameConfig.TimeBetweenWaves = 7
 GameConfig.Footprint = 7
+GameConfig.MaxPlayers = 4
+GameConfig.MaxTowersPerPlayer = 15
+GameConfig.LobbyCountdown = 10
+GameConfig.ResultDuration = 8
+GameConfig.MaxTowerLevel = 3
+GameConfig.UpgradeDamageMultiplier = 1.45
+GameConfig.UpgradeRangePerLevel = 3
+GameConfig.SellRefundRatio = 0.7
 
 GameConfig.Towers = {
 	MachineGun = {

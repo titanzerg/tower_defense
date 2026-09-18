@@ -11,15 +11,25 @@ end
 
 local remotes = newInstance("Folder", "TowerDefenseRemotes", ReplicatedStorage)
 local placeTowerRemote = newInstance("RemoteEvent", "PlaceTower", remotes)
+local towerActionRemote = newInstance("RemoteEvent", "TowerAction", remotes)
+local readyRemote = newInstance("RemoteEvent", "ToggleReady", remotes)
 local notifyRemote = newInstance("RemoteEvent", "Notify", remotes)
+
 local gameState = newInstance("Folder", "GameState", ReplicatedStorage)
+gameState:SetAttribute("State", "Waiting")
 gameState:SetAttribute("Wave", 0)
 gameState:SetAttribute("BaseHealth", Config.BaseHealth)
-gameState:SetAttribute("Status", "กำลังเตรียมเกม...")
+gameState:SetAttribute("Status", "กด Ready เพื่อเริ่มเกม")
+gameState:SetAttribute("PlayerCount", 0)
 
 local enemies = newInstance("Folder", "Enemies", workspace)
 local towers = newInstance("Folder", "Towers", workspace)
 local map = newInstance("Folder", "GeneratedMap", workspace)
+
+local activeMoves = {}
+local damageLedgers = {}
+local towerRuntime = {}
+local participants = {}
 
 local function makePart(name, size, position, color, material, parent)
 	local part = Instance.new("Part")
@@ -52,9 +62,46 @@ local function setupPlayer(player)
 	local leaderstats = newInstance("Folder", "leaderstats", player)
 	local cash = newInstance("IntValue", "Cash", leaderstats)
 	cash.Value = Config.StartingCash
+	player:SetAttribute("Ready", false)
+	player:SetAttribute("Participating", false)
+	player:SetAttribute("TowersPlaced", 0)
+	player:SetAttribute("Damage", 0)
+	player:SetAttribute("Kills", 0)
 end
 Players.PlayerAdded:Connect(setupPlayer)
 for _, player in Players:GetPlayers() do setupPlayer(player) end
+
+local function getPlayerByUserId(userId)
+	for _, player in Players:GetPlayers() do if player.UserId == userId then return player end end
+	return nil
+end
+
+local function getReadyPlayers()
+	local ready = {}
+	for _, player in Players:GetPlayers() do
+		if player:GetAttribute("Ready") and #ready < Config.MaxPlayers then table.insert(ready, player) end
+	end
+	return ready
+end
+
+local function updatePlayerCount()
+	local count = 0
+	for player in participants do if player.Parent then count += 1 end end
+	gameState:SetAttribute("PlayerCount", count)
+end
+
+readyRemote.OnServerEvent:Connect(function(player)
+	local state = gameState:GetAttribute("State")
+	if state ~= "Waiting" and state ~= "Countdown" then
+		notifyRemote:FireClient(player, "รอเข้าร่วมเกมรอบถัดไป")
+		return
+	end
+	if not player:GetAttribute("Ready") and #getReadyPlayers() >= Config.MaxPlayers then
+		notifyRemote:FireClient(player, "แมตช์นี้มีผู้เล่นครบแล้ว")
+		return
+	end
+	player:SetAttribute("Ready", not player:GetAttribute("Ready"))
+end)
 
 local function distanceToSegment(point, a, b)
 	local ab = b - a
@@ -77,34 +124,60 @@ local function canTarget(towerData, enemy)
 	return towerData.Target == "Both" or towerData.Target == movement
 end
 
-local function damageEnemy(enemy, damage)
-	local health = enemy:GetAttribute("Health")
-	if health and health > 0 then enemy:SetAttribute("Health", math.max(0, health - damage)) end
-end
-
-local function showShot(origin, destination, color)
-	local distance = (destination - origin).Magnitude
-	local beam = makePart("Shot", Vector3.new(0.22, 0.22, distance), (origin + destination) / 2, color, Enum.Material.Neon, workspace)
-	beam.CanCollide, beam.CanQuery = false, false
-	beam.CFrame = CFrame.lookAt(beam.Position, destination)
-	task.delay(0.08, function() beam:Destroy() end)
-end
-
-local function attack(towerData, target, origin)
-	if not target.PrimaryPart then return end
-	local targetPosition = target.PrimaryPart.Position
-	showShot(origin, targetPosition, towerData.Color)
-	damageEnemy(target, towerData.Damage)
-	if towerData.SplashRadius then
-		for _, other in enemies:GetChildren() do
-			if other ~= target and other.PrimaryPart and other:GetAttribute("Movement") == "Ground" and (other.PrimaryPart.Position - targetPosition).Magnitude <= towerData.SplashRadius then
-				damageEnemy(other, towerData.Damage * 0.65)
+local function awardEnemy(enemy, enemyData)
+	local ledger = damageLedgers[enemy] or {}
+	local totalDamage = 0
+	for _, damage in ledger do totalDamage += damage end
+	if totalDamage > 0 then
+		for userId, damage in ledger do
+			local player = getPlayerByUserId(userId)
+			if player and participants[player] then
+				local cash = player.leaderstats and player.leaderstats:FindFirstChild("Cash")
+				if cash then cash.Value += math.max(1, math.round(enemyData.Reward * damage / totalDamage)) end
 			end
 		end
 	end
-	if towerData.SlowMultiplier and target.Parent then
-		target:SetAttribute("SlowMultiplier", towerData.SlowMultiplier)
-		target:SetAttribute("SlowUntil", workspace:GetServerTimeNow() + towerData.SlowDuration)
+	local lastHit = enemy:GetAttribute("LastHitUserId")
+	local killer = lastHit and getPlayerByUserId(lastHit)
+	if killer then killer:SetAttribute("Kills", (killer:GetAttribute("Kills") or 0) + 1) end
+	damageLedgers[enemy] = nil
+end
+
+local function damageEnemy(enemy, requestedDamage, owner)
+	local health = enemy:GetAttribute("Health")
+	if not health or health <= 0 or not enemy.Parent then return end
+	local actualDamage = math.min(health, requestedDamage)
+	local ledger = damageLedgers[enemy]
+	if owner and ledger then
+		ledger[owner.UserId] = (ledger[owner.UserId] or 0) + actualDamage
+		owner:SetAttribute("Damage", math.round((owner:GetAttribute("Damage") or 0) + actualDamage))
+		enemy:SetAttribute("LastHitUserId", owner.UserId)
+	end
+	enemy:SetAttribute("Health", math.max(0, health - requestedDamage))
+end
+
+local function showShot(origin, destination, color)
+	local beam = makePart("Shot", Vector3.new(0.22, 0.22, (destination - origin).Magnitude), (origin + destination) / 2, color, Enum.Material.Neon, workspace)
+	beam.CanCollide, beam.CanQuery = false, false
+	beam.CFrame = CFrame.lookAt(beam.Position, destination)
+	task.delay(0.08, function() if beam.Parent then beam:Destroy() end end)
+end
+
+local function attack(runtime, target, origin, owner)
+	if not target.PrimaryPart then return end
+	local targetPosition = target.PrimaryPart.Position
+	showShot(origin, targetPosition, runtime.Color)
+	damageEnemy(target, runtime.Damage, owner)
+	if runtime.SplashRadius then
+		for _, other in enemies:GetChildren() do
+			if other ~= target and other.PrimaryPart and other:GetAttribute("Movement") == "Ground" and (other.PrimaryPart.Position - targetPosition).Magnitude <= runtime.SplashRadius then
+				damageEnemy(other, runtime.Damage * 0.65, owner)
+			end
+		end
+	end
+	if runtime.SlowMultiplier and target.Parent then
+		target:SetAttribute("SlowMultiplier", runtime.SlowMultiplier)
+		target:SetAttribute("SlowUntil", workspace:GetServerTimeNow() + runtime.SlowDuration)
 	end
 end
 
@@ -112,25 +185,32 @@ local function createTower(position, owner, towerType, towerData)
 	local model = Instance.new("Model")
 	model.Name = towerType
 	model:SetAttribute("OwnerUserId", owner.UserId)
+	model:SetAttribute("OwnerName", owner.DisplayName)
 	model:SetAttribute("TowerType", towerType)
+	model:SetAttribute("Level", 1)
+	model:SetAttribute("Paid", towerData.Cost)
+	model:SetAttribute("Damage", towerData.Damage)
+	model:SetAttribute("Range", towerData.Range)
 	local pedestal = makePart("Base", Vector3.new(5, 2, 5), position + Vector3.new(0, 1, 0), Color3.fromRGB(70, 74, 82), Enum.Material.Slate, model)
 	local head = makePart("Head", Vector3.new(3.4, 3.4, 3.4), position + Vector3.new(0, 3.7, 0), towerData.Color, Enum.Material.Metal, model)
 	head.Shape = towerType == "Cannon" and Enum.PartType.Block or Enum.PartType.Ball
-	local barrelCount = towerType == "AntiAir" and 2 or 1
 	local barrels = {}
-	for index = 1, barrelCount do
-		local offset = barrelCount == 2 and (index == 1 and -0.75 or 0.75) or 0
+	for index = 1, (towerType == "AntiAir" and 2 or 1) do
+		local offset = towerType == "AntiAir" and (index == 1 and -0.75 or 0.75) or 0
 		local barrel = makePart("Barrel", Vector3.new(0.65, 0.65, towerType == "Cannon" and 5 or 4), position + Vector3.new(offset, 3.7, -2.5), Color3.fromRGB(35, 42, 52), Enum.Material.Metal, model)
 		table.insert(barrels, { Part = barrel, Offset = offset })
 	end
+	local runtime = table.clone(towerData)
+	towerRuntime[model] = runtime
 	model.PrimaryPart, model.Parent = pedestal, towers
+	owner:SetAttribute("TowersPlaced", (owner:GetAttribute("TowersPlaced") or 0) + 1)
 
 	task.spawn(function()
-		while model.Parent and gameState:GetAttribute("BaseHealth") > 0 do
+		while model.Parent and gameState:GetAttribute("State") == "Playing" do
 			local target, bestProgress = nil, -math.huge
 			for _, enemy in enemies:GetChildren() do
 				local root, health = enemy.PrimaryPart, enemy:GetAttribute("Health")
-				if root and health and health > 0 and canTarget(towerData, enemy) and (root.Position - head.Position).Magnitude <= towerData.Range then
+				if root and health and health > 0 and canTarget(runtime, enemy) and (root.Position - head.Position).Magnitude <= runtime.Range then
 					local progress = enemy:GetAttribute("Progress") or 0
 					if progress > bestProgress then target, bestProgress = enemy, progress end
 				end
@@ -140,18 +220,20 @@ local function createTower(position, owner, towerType, towerData)
 				local flatTarget = Vector3.new(targetPosition.X, head.Position.Y, targetPosition.Z)
 				head.CFrame = CFrame.lookAt(head.Position, flatTarget)
 				for _, barrelInfo in barrels do barrelInfo.Part.CFrame = head.CFrame * CFrame.new(barrelInfo.Offset, 0, -2.5) end
-				attack(towerData, target, head.Position)
+				attack(runtime, target, head.Position, owner)
 			end
-			task.wait(towerData.Cooldown)
+			task.wait(runtime.Cooldown)
 		end
 	end)
 end
 
 placeTowerRemote.OnServerEvent:Connect(function(player, towerType, requestedPosition)
+	if gameState:GetAttribute("State") ~= "Playing" or not participants[player] then notifyRemote:FireClient(player, "คุณไม่ได้อยู่ในแมตช์นี้") return end
 	if typeof(towerType) ~= "string" or typeof(requestedPosition) ~= "Vector3" then return end
 	local towerData = Config.Towers[towerType]
 	if not towerData then return end
-	local cash = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Cash")
+	if (player:GetAttribute("TowersPlaced") or 0) >= Config.MaxTowersPerPlayer then notifyRemote:FireClient(player, "วางป้อมครบจำนวนสูงสุดแล้ว") return end
+	local cash = player.leaderstats and player.leaderstats:FindFirstChild("Cash")
 	if not cash or cash.Value < towerData.Cost then notifyRemote:FireClient(player, "เงินไม่พอสำหรับ " .. towerData.Name) return end
 	local position = Vector3.new(math.round(requestedPosition.X), 0, math.round(requestedPosition.Z))
 	local allowed, reason = canPlaceTower(position)
@@ -161,45 +243,68 @@ placeTowerRemote.OnServerEvent:Connect(function(player, towerType, requestedPosi
 	notifyRemote:FireClient(player, "สร้าง " .. towerData.Name .. " สำเร็จ")
 end)
 
-local function createEnemy(enemyType)
+towerActionRemote.OnServerEvent:Connect(function(player, action, tower)
+	if typeof(action) ~= "string" or typeof(tower) ~= "Instance" or not tower:IsDescendantOf(towers) then return end
+	if tower:GetAttribute("OwnerUserId") ~= player.UserId then notifyRemote:FireClient(player, "เฉพาะเจ้าของป้อมเท่านั้น") return end
+	local cash = player.leaderstats and player.leaderstats:FindFirstChild("Cash")
+	if not cash then return end
+	if action == "Sell" then
+		cash.Value += math.round((tower:GetAttribute("Paid") or 0) * Config.SellRefundRatio)
+		player:SetAttribute("TowersPlaced", math.max(0, (player:GetAttribute("TowersPlaced") or 1) - 1))
+		towerRuntime[tower] = nil
+		tower:Destroy()
+	elseif action == "Upgrade" then
+		local level = tower:GetAttribute("Level") or 1
+		if level >= Config.MaxTowerLevel then notifyRemote:FireClient(player, "ป้อมนี้เลเวลสูงสุดแล้ว") return end
+		local baseData = Config.Towers[tower:GetAttribute("TowerType")]
+		local cost = math.round(baseData.Cost * (0.65 + level * 0.35))
+		if cash.Value < cost then notifyRemote:FireClient(player, "เงินไม่พอสำหรับอัปเกรด") return end
+		cash.Value -= cost
+		local runtime = towerRuntime[tower]
+		runtime.Damage *= Config.UpgradeDamageMultiplier
+		runtime.Range += Config.UpgradeRangePerLevel
+		tower:SetAttribute("Level", level + 1)
+		tower:SetAttribute("Paid", (tower:GetAttribute("Paid") or 0) + cost)
+		tower:SetAttribute("Damage", math.round(runtime.Damage))
+		tower:SetAttribute("Range", runtime.Range)
+		notifyRemote:FireClient(player, "อัปเกรดเป็นเลเวล " .. (level + 1))
+	end
+end)
+
+local function createEnemy(enemyType, healthMultiplier)
 	local data = Config.Enemies[enemyType]
+	local maxHealth = math.round(data.Health * healthMultiplier)
 	local model = Instance.new("Model")
 	model.Name = enemyType
 	model:SetAttribute("EnemyType", enemyType)
 	model:SetAttribute("Movement", data.Movement)
-	model:SetAttribute("Health", data.Health)
-	model:SetAttribute("MaxHealth", data.Health)
+	model:SetAttribute("Health", maxHealth)
+	model:SetAttribute("MaxHealth", maxHealth)
 	model:SetAttribute("Progress", 0)
 	model:SetAttribute("SlowMultiplier", 1)
 	local altitude = data.Movement == "Air" and 12 or data.Size / 2
 	local root = makePart("Root", Vector3.new(data.Size, data.Size, data.Size), Config.Waypoints[1] + Vector3.new(0, altitude, 0), data.Color, data.Movement == "Air" and Enum.Material.Neon or Enum.Material.SmoothPlastic, model)
 	root.Shape, root.CanCollide, model.PrimaryPart = Enum.PartType.Ball, false, root
 	if data.Movement == "Air" then
-		local leftWing = makePart("Wing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(-3.5, 0, 0), data.Color, Enum.Material.Neon, model)
-		local rightWing = leftWing:Clone()
-		rightWing.Position, rightWing.Parent = root.Position + Vector3.new(3.5, 0, 0), model
+		makePart("LeftWing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(-3.5, 0, 0), data.Color, Enum.Material.Neon, model)
+		makePart("RightWing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(3.5, 0, 0), data.Color, Enum.Material.Neon, model)
 	end
 	local gui = newInstance("BillboardGui", "Health", root)
 	gui.Size, gui.StudsOffset, gui.AlwaysOnTop = UDim2.fromOffset(64, 10), Vector3.new(0, data.Size / 2 + 1.3, 0), true
 	local healthBar = newInstance("Frame", "Bar", gui)
 	healthBar.Size, healthBar.BackgroundColor3, healthBar.BorderSizePixel = UDim2.fromScale(1, 1), Color3.fromRGB(70, 210, 100), 0
+	damageLedgers[model] = {}
 	model:GetAttributeChangedSignal("Health"):Connect(function()
 		local health = model:GetAttribute("Health")
-		healthBar.Size = UDim2.fromScale(math.max(0, health / data.Health), 1)
-		if health <= 0 and model.Parent then
-			for _, player in Players:GetPlayers() do
-				local cash = player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Cash")
-				if cash then cash.Value += data.Reward end
-			end
-			model:Destroy()
-		end
+		healthBar.Size = UDim2.fromScale(math.max(0, health / maxHealth), 1)
+		if health <= 0 and model.Parent then awardEnemy(model, data) model:Destroy() end
 	end)
 	model.Parent = enemies
 	return model, data, altitude
 end
 
-local activeMoves = {}
 RunService.Heartbeat:Connect(function(deltaTime)
+	if gameState:GetAttribute("State") ~= "Playing" then return end
 	for enemy, moveState in activeMoves do
 		local health = enemy.Parent and enemy:GetAttribute("Health")
 		if not health or health <= 0 then activeMoves[enemy] = nil continue end
@@ -211,7 +316,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			enemy:PivotTo(enemy:GetPivot() + offset)
 			moveState.Waypoint += 1
 			if moveState.Waypoint > #Config.Waypoints then
-				activeMoves[enemy] = nil
+				activeMoves[enemy], damageLedgers[enemy] = nil, nil
 				gameState:SetAttribute("BaseHealth", math.max(0, gameState:GetAttribute("BaseHealth") - moveState.BaseDamage))
 				enemy:Destroy()
 			end
@@ -222,23 +327,90 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	end
 end)
 
-task.spawn(function()
-	task.wait(3)
-	for waveNumber, groups in Config.Waves do
-		if gameState:GetAttribute("BaseHealth") <= 0 then break end
-		gameState:SetAttribute("Wave", waveNumber)
-		gameState:SetAttribute("Status", "เวฟ " .. waveNumber .. " กำลังมา!")
-		for _, group in groups do
-			for _ = 1, group.Count do
-				local enemy, data, altitude = createEnemy(group.Type)
-				activeMoves[enemy] = { Waypoint = 2, Speed = data.Speed, BaseDamage = data.BaseDamage, Altitude = altitude }
-				task.wait(group.Spacing)
-			end
-		end
-		repeat task.wait(0.5) until #enemies:GetChildren() == 0 or gameState:GetAttribute("BaseHealth") <= 0
-		if waveNumber < #Config.Waves then
-			for seconds = Config.TimeBetweenWaves, 1, -1 do gameState:SetAttribute("Status", "เวฟถัดไปใน " .. seconds .. " วินาที") task.wait(1) end
+local function clearMatch()
+	for _, child in enemies:GetChildren() do child:Destroy() end
+	for _, child in towers:GetChildren() do child:Destroy() end
+	table.clear(activeMoves)
+	table.clear(damageLedgers)
+	table.clear(towerRuntime)
+	for _, player in Players:GetPlayers() do
+		player:SetAttribute("Participating", false)
+		player:SetAttribute("TowersPlaced", 0)
+	end
+	table.clear(participants)
+	updatePlayerCount()
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	participants[player] = nil
+	for _, tower in towers:GetChildren() do
+		if tower:GetAttribute("OwnerUserId") == player.UserId then
+			towerRuntime[tower] = nil
+			tower:Destroy()
 		end
 	end
-	gameState:SetAttribute("Status", gameState:GetAttribute("BaseHealth") > 0 and "ชนะแล้ว! ป้องกันฐานสำเร็จ" or "เกมจบ — ฐานถูกทำลาย")
+	updatePlayerCount()
+end)
+
+task.spawn(function()
+	while true do
+		gameState:SetAttribute("State", "Waiting")
+		gameState:SetAttribute("Status", "กด Ready เพื่อเริ่มเกม")
+		gameState:SetAttribute("Wave", 0)
+		gameState:SetAttribute("BaseHealth", Config.BaseHealth)
+		repeat task.wait(0.5) until #getReadyPlayers() > 0
+
+		gameState:SetAttribute("State", "Countdown")
+		local cancelled = false
+		for seconds = Config.LobbyCountdown, 1, -1 do
+			if #getReadyPlayers() == 0 then cancelled = true break end
+			gameState:SetAttribute("Status", "เกมเริ่มใน " .. seconds .. " วินาที")
+			task.wait(1)
+		end
+		if cancelled then continue end
+
+		for _, player in getReadyPlayers() do
+			participants[player] = true
+			player:SetAttribute("Participating", true)
+			player:SetAttribute("Ready", false)
+			player:SetAttribute("TowersPlaced", 0)
+			player:SetAttribute("Damage", 0)
+			player:SetAttribute("Kills", 0)
+			player.leaderstats.Cash.Value = Config.StartingCash
+		end
+		updatePlayerCount()
+		local participantCount = gameState:GetAttribute("PlayerCount")
+		local healthMultiplier = 1 + 0.45 * (participantCount - 1)
+		local countMultiplier = 1 + 0.20 * (participantCount - 1)
+		gameState:SetAttribute("State", "Playing")
+
+		for waveNumber, groups in Config.Waves do
+			if gameState:GetAttribute("BaseHealth") <= 0 or gameState:GetAttribute("PlayerCount") <= 0 then break end
+			gameState:SetAttribute("Wave", waveNumber)
+			gameState:SetAttribute("Status", "เวฟ " .. waveNumber .. " กำลังมา!")
+			for _, group in groups do
+				for _ = 1, math.ceil(group.Count * countMultiplier) do
+					if gameState:GetAttribute("BaseHealth") <= 0 or gameState:GetAttribute("PlayerCount") <= 0 then break end
+					local enemy, data, altitude = createEnemy(group.Type, healthMultiplier)
+					activeMoves[enemy] = { Waypoint = 2, Speed = data.Speed, BaseDamage = data.BaseDamage, Altitude = altitude }
+					task.wait(group.Spacing)
+				end
+			end
+			repeat task.wait(0.5) until #enemies:GetChildren() == 0 or gameState:GetAttribute("BaseHealth") <= 0 or gameState:GetAttribute("PlayerCount") <= 0
+			if waveNumber < #Config.Waves and gameState:GetAttribute("BaseHealth") > 0 then
+				for seconds = Config.TimeBetweenWaves, 1, -1 do gameState:SetAttribute("Status", "เวฟถัดไปใน " .. seconds .. " วินาที") task.wait(1) end
+			end
+		end
+
+		gameState:SetAttribute("State", "Results")
+		if gameState:GetAttribute("PlayerCount") <= 0 then
+			gameState:SetAttribute("Status", "แมตช์จบ — ผู้เล่นออกจากเกมทั้งหมด")
+		elseif gameState:GetAttribute("BaseHealth") > 0 then
+			gameState:SetAttribute("Status", "ชนะแล้ว! ป้องกันฐานสำเร็จ")
+		else
+			gameState:SetAttribute("Status", "เกมจบ — ฐานถูกทำลาย")
+		end
+		task.wait(Config.ResultDuration)
+		clearMatch()
+	end
 end)
