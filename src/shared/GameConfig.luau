@@ -33,7 +33,7 @@ GameConfig.Towers = {
 }
 
 GameConfig.Enemies = {
-	Grunt = { Name = "Grunt", Movement = "Ground", Health = 50, Speed = 8, Reward = 18, BaseDamage = 1, Color = Color3.fromRGB(214, 76, 70), Size = 4 },
+	Grunt = { Name = "Grunt", Model = "Drooling Zombie", WalkAnimation = "rbxassetid://180426354", Movement = "Ground", Health = 50, Speed = 8, Reward = 18, BaseDamage = 1, Color = Color3.fromRGB(214, 76, 70), Size = 4 },
 	Runner = { Name = "Runner", Movement = "Ground", Health = 32, Speed = 14, Reward = 22, BaseDamage = 1, Color = Color3.fromRGB(239, 198, 68), Size = 3.2 },
 	Tank = { Name = "Tank", Movement = "Ground", Health = 240, Speed = 5, Reward = 55, BaseDamage = 3, Color = Color3.fromRGB(92, 100, 112), Size = 6 },
 	Flyer = { Name = "Flyer", Movement = "Air", Health = 70, Speed = 11, Reward = 32, BaseDamage = 1, Color = Color3.fromRGB(164, 95, 225), Size = 4 },

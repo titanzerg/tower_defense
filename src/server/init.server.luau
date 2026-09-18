@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 local Config = require(ReplicatedStorage.Shared.GameConfig)
 
 local function newInstance(className, name, parent)
@@ -30,6 +31,21 @@ local activeMoves = {}
 local damageLedgers = {}
 local towerRuntime = {}
 local participants = {}
+
+local enemyTemplates = ServerStorage:FindFirstChild("Assets")
+	and ServerStorage.Assets:FindFirstChild("Enemies")
+
+local function removeEmbeddedScripts(container)
+	for _, descendant in container:GetDescendants() do
+		if descendant:IsA("LuaSourceContainer") then
+			descendant:Destroy()
+		end
+	end
+end
+
+if enemyTemplates then
+	removeEmbeddedScripts(enemyTemplates)
+end
 
 local function makePart(name, size, position, color, material, parent)
 	local part = Instance.new("Part")
@@ -271,24 +287,73 @@ towerActionRemote.OnServerEvent:Connect(function(player, action, tower)
 	end
 end)
 
+local function createEnemyModel(enemyType, data, spawnPosition)
+	local template = data.Model and enemyTemplates and enemyTemplates:FindFirstChild(data.Model)
+	if not template or not template:IsA("Model") then
+		local fallback = Instance.new("Model")
+		fallback.Name = enemyType
+		local root = makePart("Root", Vector3.new(data.Size, data.Size, data.Size), spawnPosition, data.Color, data.Movement == "Air" and Enum.Material.Neon or Enum.Material.SmoothPlastic, fallback)
+		root.Shape, root.CanCollide, fallback.PrimaryPart = Enum.PartType.Ball, false, root
+		if data.Movement == "Air" then
+			makePart("LeftWing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(-3.5, 0, 0), data.Color, Enum.Material.Neon, fallback)
+			makePart("RightWing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(3.5, 0, 0), data.Color, Enum.Material.Neon, fallback)
+		end
+		return fallback, root
+	end
+
+	local model = template:Clone()
+	model.Name = enemyType
+	removeEmbeddedScripts(model)
+	local root = model:FindFirstChild("HumanoidRootPart", true) or model:FindFirstChild("Torso", true) or model:FindFirstChildWhichIsA("BasePart", true)
+	if not root then
+		model:Destroy()
+		local fallbackData = table.clone(data)
+		fallbackData.Model = nil
+		return createEnemyModel(enemyType, fallbackData, spawnPosition)
+	end
+	model.PrimaryPart = root
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = descendant == root
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant.Massless = descendant ~= root
+		end
+	end
+	local humanoid = model:FindFirstChildWhichIsA("Humanoid", true)
+	if humanoid then
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		humanoid.BreakJointsOnDeath = false
+		if data.WalkAnimation then
+			local animator = humanoid:FindFirstChildOfClass("Animator") or newInstance("Animator", "Animator", humanoid)
+			local animation = newInstance("Animation", "WalkAnimation", model)
+			animation.AnimationId = data.WalkAnimation
+			task.defer(function()
+				local ok, track = pcall(function() return animator:LoadAnimation(animation) end)
+				if ok then
+					track.Looped = true
+					track.Priority = Enum.AnimationPriority.Movement
+					track:Play(0.2)
+				end
+			end)
+		end
+	end
+	model:PivotTo(CFrame.new(spawnPosition))
+	return model, root
+end
+
 local function createEnemy(enemyType, healthMultiplier)
 	local data = Config.Enemies[enemyType]
 	local maxHealth = math.round(data.Health * healthMultiplier)
-	local model = Instance.new("Model")
-	model.Name = enemyType
+	local altitude = data.Movement == "Air" and 12 or (data.Model and 3 or data.Size / 2)
+	local model, root = createEnemyModel(enemyType, data, Config.Waypoints[1] + Vector3.new(0, altitude, 0))
 	model:SetAttribute("EnemyType", enemyType)
 	model:SetAttribute("Movement", data.Movement)
 	model:SetAttribute("Health", maxHealth)
 	model:SetAttribute("MaxHealth", maxHealth)
 	model:SetAttribute("Progress", 0)
 	model:SetAttribute("SlowMultiplier", 1)
-	local altitude = data.Movement == "Air" and 12 or data.Size / 2
-	local root = makePart("Root", Vector3.new(data.Size, data.Size, data.Size), Config.Waypoints[1] + Vector3.new(0, altitude, 0), data.Color, data.Movement == "Air" and Enum.Material.Neon or Enum.Material.SmoothPlastic, model)
-	root.Shape, root.CanCollide, model.PrimaryPart = Enum.PartType.Ball, false, root
-	if data.Movement == "Air" then
-		makePart("LeftWing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(-3.5, 0, 0), data.Color, Enum.Material.Neon, model)
-		makePart("RightWing", Vector3.new(6, 0.4, 2), root.Position + Vector3.new(3.5, 0, 0), data.Color, Enum.Material.Neon, model)
-	end
 	local gui = newInstance("BillboardGui", "Health", root)
 	gui.Size, gui.StudsOffset, gui.AlwaysOnTop = UDim2.fromOffset(64, 10), Vector3.new(0, data.Size / 2 + 1.3, 0), true
 	local healthBar = newInstance("Frame", "Bar", gui)

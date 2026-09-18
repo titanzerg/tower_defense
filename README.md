@@ -29,6 +29,15 @@ Tower roles:
 - **Cannon** deals splash damage to groups on the ground.
 - **Frost** targets both types and temporarily slows them.
 
+## Enemy models
+
+The Grunt uses `ServerStorage/Assets/Enemies/Drooling Zombie` when that model is
+present in the Studio place. The server removes every embedded Script,
+LocalScript, and ModuleScript before use, disables collision, selects
+`HumanoidRootPart` (or `Torso`) as its root, and plays the configured walk
+animation. If the model is missing or invalid, the procedural enemy is used as
+a safe fallback.
+
 To build a standalone place:
 
 ```bash
