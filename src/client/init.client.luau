@@ -2,14 +2,51 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local StarterGui = game:GetService("StarterGui")
 local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+StarterGui.ScreenOrientation = Enum.ScreenOrientation.LandscapeSensor
 local mouse = player:GetMouse()
 local Config = require(ReplicatedStorage.Shared.GameConfig)
 local remotes = ReplicatedStorage:WaitForChild("TowerDefenseRemotes")
 local gameState = ReplicatedStorage:WaitForChild("GameState")
 
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name, screenGui.ResetOnSpawn, screenGui.Parent = "TowerDefenseUI", false, player:WaitForChild("PlayerGui")
+screenGui.Name, screenGui.ResetOnSpawn = "TowerDefenseUI", false
+screenGui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
+screenGui.ClipToDeviceSafeArea = true
+screenGui.Parent = playerGui
+
+-- This game does not use character jumping. Remove only the mobile jump button
+-- while keeping Roblox's movement thumbstick available.
+local function hideJumpButton()
+	local touchGui = playerGui:FindFirstChild("TouchGui")
+	local jumpButton = touchGui and touchGui:FindFirstChild("JumpButton", true)
+	if jumpButton and jumpButton:IsA("GuiObject") then
+		jumpButton.Visible = false
+		jumpButton.Active = false
+	end
+end
+
+local function disableCharacterJump(character)
+	local humanoid = character:WaitForChild("Humanoid")
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	humanoid.Jump = false
+	hideJumpButton()
+end
+
+playerGui.DescendantAdded:Connect(function(descendant)
+	if descendant.Name == "JumpButton" and descendant:IsA("GuiObject") then
+		descendant.Visible = false
+		descendant.Active = false
+	end
+end)
+
+player.CharacterAdded:Connect(disableCharacterJump)
+if player.Character then
+	task.spawn(disableCharacterJump, player.Character)
+end
+task.defer(hideJumpButton)
 
 local function addCorner(guiObject, radius)
 	local corner = Instance.new("UICorner")
@@ -60,6 +97,9 @@ local buttons = {}
 local selectedTowerType = nil
 local selectedTowerModel = nil
 local placing = false
+local isTouchPlacement = UserInputService.TouchEnabled
+local pendingPlacementPosition = nil
+local lastTowerButtonActivation = 0
 
 for _, towerType in towerOrder do
 	local data = Config.Towers[towerType]
@@ -94,19 +134,58 @@ rangePreview.CanCollide, rangePreview.CanQuery = false, false
 rangePreview.Material, rangePreview.Color, rangePreview.Transparency = Enum.Material.ForceField, Color3.fromRGB(100, 190, 255), 1
 rangePreview.Parent = workspace
 
+local placementActions = Instance.new("Frame")
+placementActions.Name = "PlacementActions"
+placementActions.Size = UDim2.fromOffset(310, 58)
+placementActions.Position = UDim2.new(0.5, -155, 1, -174)
+placementActions.BackgroundTransparency = 1
+placementActions.Visible = false
+placementActions.Parent = screenGui
+
+local confirmPlacementButton = Instance.new("TextButton")
+confirmPlacementButton.Size, confirmPlacementButton.Position = UDim2.fromOffset(190, 54), UDim2.fromOffset(0, 0)
+confirmPlacementButton.Text, confirmPlacementButton.TextSize = "วางป้อม", 19
+style(confirmPlacementButton, Color3.fromRGB(47, 176, 98))
+confirmPlacementButton.Parent = placementActions
+
+local cancelPlacementButton = Instance.new("TextButton")
+cancelPlacementButton.Size, cancelPlacementButton.Position = UDim2.fromOffset(110, 54), UDim2.fromOffset(200, 0)
+cancelPlacementButton.Text, cancelPlacementButton.TextSize = "ยกเลิก", 17
+style(cancelPlacementButton, Color3.fromRGB(190, 73, 65))
+cancelPlacementButton.Parent = placementActions
+
+local function updatePreview(position)
+	preview.Position = position
+	local range = Config.Towers[selectedTowerType].Range
+	rangePreview.Size = Vector3.new(0.18, range * 2, range * 2)
+	rangePreview.CFrame = CFrame.new(position - Vector3.new(0, 0.03, 0)) * CFrame.Angles(0, 0, math.rad(90))
+	preview.Transparency, rangePreview.Transparency = 0.4, 0.72
+end
+
 local function stopPlacing()
 	placing, selectedTowerType = false, nil
+	pendingPlacementPosition = nil
+	placementActions.Visible = false
 	preview.Transparency, rangePreview.Transparency = 1, 1
 	for towerType, button in buttons do button.BackgroundColor3 = Config.Towers[towerType].Color end
 end
 
 for towerType, button in buttons do
 	button.Activated:Connect(function()
+		lastTowerButtonActivation = os.clock()
 		if gameState:GetAttribute("State") ~= "Playing" or not player:GetAttribute("Participating") then return end
 		if placing and selectedTowerType == towerType then stopPlacing() return end
 		placing, selectedTowerType, selectedTowerModel = true, towerType, nil
 		towerPanel.Visible = false
-		preview.Color, preview.Transparency, rangePreview.Transparency = Config.Towers[towerType].Color, 0.4, 0.72
+		preview.Color = Config.Towers[towerType].Color
+		pendingPlacementPosition = nil
+		placementActions.Visible = isTouchPlacement
+		confirmPlacementButton.Active = false
+		confirmPlacementButton.AutoButtonColor = false
+		confirmPlacementButton.BackgroundColor3 = Color3.fromRGB(86, 96, 106)
+		if not isTouchPlacement then
+			preview.Transparency, rangePreview.Transparency = 0.4, 0.72
+		end
 		for otherType, otherButton in buttons do otherButton.BackgroundColor3 = otherType == towerType and Color3.fromRGB(245, 180, 55) or Config.Towers[otherType].Color end
 	end)
 end
@@ -138,14 +217,18 @@ sellButton.Activated:Connect(function()
 end)
 
 RunService.RenderStepped:Connect(function()
-	if not placing or not selectedTowerType then return end
+	if isTouchPlacement or not placing or not selectedTowerType then return end
 	local hit = mouse.Hit.Position
 	local position = Vector3.new(math.round(hit.X), 0.25, math.round(hit.Z))
-	preview.Position = position
-	local range = Config.Towers[selectedTowerType].Range
-	rangePreview.Size = Vector3.new(0.18, range * 2, range * 2)
-	rangePreview.CFrame = CFrame.new(position - Vector3.new(0, 0.03, 0)) * CFrame.Angles(0, 0, math.rad(90))
+	updatePreview(position)
 end)
+
+confirmPlacementButton.Activated:Connect(function()
+	if not placing or not selectedTowerType or not pendingPlacementPosition then return end
+	remotes.PlaceTower:FireServer(selectedTowerType, pendingPlacementPosition)
+	stopPlacing()
+end)
+cancelPlacementButton.Activated:Connect(stopPlacing)
 
 local function refreshHud()
 	local leaderstats = player:FindFirstChild("leaderstats")
@@ -184,15 +267,49 @@ remotes.Notify.OnClientEvent:Connect(function(message)
 	task.delay(2, function() if version == toastVersion then toast.Visible = false end end)
 end)
 
-mouse.Button1Down:Connect(function()
-	local mousePosition = UserInputService:GetMouseLocation()
-	if #player.PlayerGui:GetGuiObjectsAtPosition(mousePosition.X, mousePosition.Y) > 0 or UserInputService:GetFocusedTextBox() then return end
+local camera = workspace.CurrentCamera
+
+local function raycastFromScreen(screenPosition)
+	local ray = camera:ViewportPointToRay(screenPosition.X, screenPosition.Y)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { preview, rangePreview, player.Character }
+	params.IgnoreWater = true
+	return workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+end
+
+local function isGameControlAt(screenPosition)
+	if UserInputService:GetFocusedTextBox() then return true end
+	for _, gui in player.PlayerGui:GetGuiObjectsAtPosition(screenPosition.X, screenPosition.Y) do
+		-- Roblox's transparent TouchControlFrame covers most of a phone screen.
+		-- Only actual buttons/text fields and this game's visible UI block placement.
+		if gui:IsA("GuiButton") or gui:IsA("TextBox") or gui:IsDescendantOf(screenGui) then
+			return true
+		end
+	end
+	return false
+end
+
+local function handleWorldPress(screenPosition)
+	if isGameControlAt(screenPosition) then return end
+	local result = raycastFromScreen(screenPosition)
+	if not result then return end
 	if placing and selectedTowerType then
-		remotes.PlaceTower:FireServer(selectedTowerType, preview.Position)
-		stopPlacing()
+		local hit = result.Position
+		local position = Vector3.new(math.round(hit.X), 0.25, math.round(hit.Z))
+		updatePreview(position)
+		if isTouchPlacement then
+			pendingPlacementPosition = position
+			confirmPlacementButton.Active = true
+			confirmPlacementButton.AutoButtonColor = true
+			confirmPlacementButton.BackgroundColor3 = Color3.fromRGB(47, 176, 98)
+		else
+			remotes.PlaceTower:FireServer(selectedTowerType, position)
+			stopPlacing()
+		end
 		return
 	end
-	local target = mouse.Target
+	local target = result.Instance
 	local model = target and target:FindFirstAncestorOfClass("Model")
 	if model and model.Parent == workspace:FindFirstChild("Towers") then
 		selectedTowerModel = model
@@ -200,6 +317,18 @@ mouse.Button1Down:Connect(function()
 	else
 		towerPanel.Visible, selectedTowerModel = false, nil
 	end
+end
+
+local lastTouchTime = 0
+UserInputService.TouchTapInWorld:Connect(function(screenPosition, processedByUI)
+	if processedByUI then return end
+	lastTouchTime = os.clock()
+	handleWorldPress(screenPosition)
+end)
+
+mouse.Button1Down:Connect(function()
+	if os.clock() - lastTouchTime < 0.25 or os.clock() - lastTowerButtonActivation < 0.45 then return end
+	handleWorldPress(UserInputService:GetMouseLocation())
 end)
 UserInputService.InputBegan:Connect(function(input, processed)
 	if not processed and input.KeyCode == Enum.KeyCode.Escape then stopPlacing() towerPanel.Visible, selectedTowerModel = false, nil end

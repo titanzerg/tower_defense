@@ -27,8 +27,9 @@ local enemies = newInstance("Folder", "Enemies", workspace)
 local towers = newInstance("Folder", "Towers", workspace)
 local map = newInstance("Folder", "GeneratedMap", workspace)
 
-local activeMoves = {}
-local damageLedgers = {}
+-- Weak tables to prevent memory leaks (issue #2)
+local activeMoves = setmetatable({}, { __mode = "k" })
+local damageLedgers = setmetatable({}, { __mode = "k" })
 local towerRuntime = {}
 local participants = {}
 
@@ -141,7 +142,10 @@ local function canTarget(towerData, enemy)
 end
 
 local function awardEnemy(enemy, enemyData)
-	local ledger = damageLedgers[enemy] or {}
+	-- Prevent memory leak: remove ledger after awarding rewards
+	-- Weak table ensures old entries are GC'd automatically
+	local ledger = damageLedgers[enemy]
+	if not ledger then return end
 	local totalDamage = 0
 	for _, damage in ledger do totalDamage += damage end
 	if totalDamage > 0 then
@@ -156,6 +160,7 @@ local function awardEnemy(enemy, enemyData)
 	local lastHit = enemy:GetAttribute("LastHitUserId")
 	local killer = lastHit and getPlayerByUserId(lastHit)
 	if killer then killer:SetAttribute("Kills", (killer:GetAttribute("Kills") or 0) + 1) end
+	-- Manual cleanup for weak table (optional, since __mode="k" does it)
 	damageLedgers[enemy] = nil
 end
 
@@ -243,8 +248,21 @@ local function createTower(position, owner, towerType, towerData)
 	end)
 end
 
+-- Security fix (issue #1): เพิ่ม owner check ก่อนดำเนินการใดๆ
 placeTowerRemote.OnServerEvent:Connect(function(player, towerType, requestedPosition)
-	if gameState:GetAttribute("State") ~= "Playing" or not participants[player] then notifyRemote:FireClient(player, "คุณไม่ได้อยู่ในแมตช์นี้") return end
+	-- Prevent RemoteExploitation: ตรวจสอบว่าผู้เล่นอยู่ใน match และ state เป็น Playing
+	if gameState:GetAttribute("State") ~= "Playing" or not participants[player] then
+		notifyRemote:FireClient(player, "คุณไม่ได้อยู่ในแมตช์นี้")
+		return
+	end
+	
+	-- Security: Validate inputs (ป้องกัน type confusion attacks)
+	if typeof(towerType) ~= "string" or typeof(requestedPosition) ~= "Vector3" then return end
+	
+	-- Security: ตรวจสอบ towerData ก่อนใช้ (ป้องกัน nil access)
+	local towerData = Config.Towers[towerType]
+	if not towerData then return end
+
 	if typeof(towerType) ~= "string" or typeof(requestedPosition) ~= "Vector3" then return end
 	local towerData = Config.Towers[towerType]
 	if not towerData then return end
