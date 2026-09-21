@@ -3,6 +3,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local Config = require(ReplicatedStorage.Shared.GameConfig)
+local Routes = require(ReplicatedStorage.Shared.Routes)
+local activePaths = Routes.Layouts[1].Paths
+local totalWaves = 15
+local spawnSequence = 0
 local TowerVisuals = require(ReplicatedStorage.Shared.TowerVisuals)
 
 local function newInstance(className, name, parent)
@@ -60,13 +64,32 @@ end
 
 local grass = makePart("BuildArea", Vector3.new(240, 2, 140), Vector3.new(0, -1, 0), Color3.fromRGB(69, 125, 64), Enum.Material.Grass, map)
 grass:SetAttribute("BuildSurface", true)
-for index = 1, #Config.Waypoints - 1 do
-	local startPosition, endPosition = Config.Waypoints[index], Config.Waypoints[index + 1]
-	local path = makePart("Path", Vector3.new(14, 0.35, (endPosition - startPosition).Magnitude + 12), (startPosition + endPosition) / 2 - Vector3.new(0, 0.8, 0), Color3.fromRGB(194, 163, 112), Enum.Material.Ground, map)
-	path.CFrame = CFrame.lookAt(path.Position, endPosition)
+local routeFolder = newInstance("Folder", "Routes", map)
+local function rebuildRoutes()
+	routeFolder:ClearAllChildren()
+	local layout = Routes.Layouts[math.random(1, #Routes.Layouts)]
+	activePaths = layout.Paths
+	spawnSequence = 0
+	gameState:SetAttribute("Layout", layout.Name)
+	gameState:SetAttribute("RouteCount", #activePaths)
+	for routeIndex, path in activePaths do
+		for i=1,#path-1 do
+			local a,b=path[i],path[i+1]
+			local road=makePart("Path",Vector3.new(14,0.35,(b-a).Magnitude+12),(a+b)/2-Vector3.new(0,0.8,0),Color3.fromRGB(194,163,112),Enum.Material.Ground,routeFolder)
+			road.CFrame=CFrame.lookAt(road.Position, b-Vector3.new(0,0.8,0))
+		end
+		local marker=makePart("Spawn"..routeIndex,Vector3.new(2,6,2),path[1]+Vector3.new(0,2,0),Color3.fromRGB(210,75,80),Enum.Material.Neon,routeFolder)
+		local gui=newInstance("BillboardGui","SpawnLabel",marker)
+		gui.Size,gui.StudsOffset,gui.AlwaysOnTop=UDim2.fromOffset(160,36),Vector3.new(0,5,0),true
+		local label=newInstance("TextLabel","Label",gui)
+		label.Size,label.BackgroundTransparency,label.TextScaled=UDim2.fromScale(1,1),0.25,true
+		label.TextColor3=Color3.new(1,1,1)
+		label.Text="SPAWN "..routeIndex..(routeIndex>1 and " • WAVE 6+" or "")
+	end
 end
+rebuildRoutes()
 
-local base = makePart("Base", Vector3.new(16, 12, 16), Config.Waypoints[#Config.Waypoints] + Vector3.new(0, 5, 0), Color3.fromRGB(55, 112, 190), Enum.Material.Metal, map)
+local base = makePart("Base", Vector3.new(16, 12, 16), activePaths[1][#activePaths[1]] + Vector3.new(0, 5, 0), Color3.fromRGB(55, 112, 190), Enum.Material.Metal, map)
 local baseBillboard = newInstance("BillboardGui", "Health", base)
 baseBillboard.Size, baseBillboard.StudsOffset, baseBillboard.AlwaysOnTop = UDim2.fromOffset(160, 42), Vector3.new(0, 9, 0), true
 local baseLabel = newInstance("TextLabel", "Label", baseBillboard)
@@ -128,8 +151,10 @@ end
 
 local function canPlaceTower(position)
 	if math.abs(position.X) > 113 or math.abs(position.Z) > 63 then return false, "วางป้อมภายในพื้นที่หญ้าเท่านั้น" end
-	for index = 1, #Config.Waypoints - 1 do
-		if distanceToSegment(position, Config.Waypoints[index], Config.Waypoints[index + 1]) < 10 then return false, "วางป้อมบนเส้นทางไม่ได้" end
+	for _, path in activePaths do
+		for i=1,#path-1 do
+			if Routes.Distance(position,path[i],path[i+1]) < 10 then return false,"วางป้อมบนเส้นทางไม่ได้" end
+		end
 	end
 	for _, tower in towers:GetChildren() do
 		if tower.PrimaryPart and (tower.PrimaryPart.Position - position).Magnitude < Config.Footprint then return false, "ป้อมอยู่ใกล้กันเกินไป" end
@@ -373,11 +398,12 @@ local function createEnemyModel(enemyType, data, spawnPosition)
 	return model, root
 end
 
-local function createEnemy(enemyType, healthMultiplier)
+local function createEnemy(enemyType, healthMultiplier, path, routeIndex)
 	local data = Config.Enemies[enemyType]
 	local maxHealth = math.round(data.Health * healthMultiplier)
 	local altitude = data.Movement == "Air" and 12 or (data.Model and 3 or data.Size / 2)
-	local model, root = createEnemyModel(enemyType, data, Config.Waypoints[1] + Vector3.new(0, altitude, 0))
+	local model, root = createEnemyModel(enemyType, data, path[1] + Vector3.new(0, altitude, 0))
+	model:SetAttribute("RouteIndex", routeIndex)
 	model:SetAttribute("EnemyType", enemyType)
 	model:SetAttribute("Movement", data.Movement)
 	model:SetAttribute("Health", maxHealth)
@@ -403,21 +429,21 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	for enemy, moveState in activeMoves do
 		local health = enemy.Parent and enemy:GetAttribute("Health")
 		if not health or health <= 0 then activeMoves[enemy] = nil continue end
-		local target = Config.Waypoints[moveState.Waypoint] + Vector3.new(0, moveState.Altitude, 0)
+		local target = moveState.Path[moveState.Waypoint] + Vector3.new(0, moveState.Altitude, 0)
 		local root, offset = enemy.PrimaryPart, target - enemy.PrimaryPart.Position
 		local multiplier = (enemy:GetAttribute("SlowUntil") or 0) > workspace:GetServerTimeNow() and enemy:GetAttribute("SlowMultiplier") or 1
 		local step = moveState.Speed * multiplier * deltaTime
 		if offset.Magnitude <= step then
 			enemy:PivotTo(enemy:GetPivot() + offset)
 			moveState.Waypoint += 1
-			if moveState.Waypoint > #Config.Waypoints then
+			if moveState.Waypoint > #moveState.Path then
 				activeMoves[enemy], damageLedgers[enemy] = nil, nil
 				gameState:SetAttribute("BaseHealth", math.max(0, gameState:GetAttribute("BaseHealth") - moveState.BaseDamage))
 				enemy:Destroy()
 			end
 		else
 			enemy:PivotTo(CFrame.lookAt(root.Position + offset.Unit * step, target))
-			enemy:SetAttribute("Progress", moveState.Waypoint * 1000 - offset.Magnitude)
+			enemy:SetAttribute("Progress", -(offset.Magnitude + Routes.Length(moveState.Path, moveState.Waypoint)))
 		end
 	end
 end)
@@ -449,6 +475,7 @@ end)
 
 task.spawn(function()
 	while true do
+		rebuildRoutes()
 		gameState:SetAttribute("State", "Waiting")
 		gameState:SetAttribute("Status", "กด Ready เพื่อเริ่มเกม")
 		gameState:SetAttribute("Wave", 0)
@@ -479,20 +506,24 @@ task.spawn(function()
 		local countMultiplier = 1 + 0.20 * (participantCount - 1)
 		gameState:SetAttribute("State", "Playing")
 
-		for waveNumber, groups in Config.Waves do
+		for waveNumber = 1, totalWaves do
+			local groups = Routes.Wave(waveNumber, Config)
 			if gameState:GetAttribute("BaseHealth") <= 0 or gameState:GetAttribute("PlayerCount") <= 0 then break end
 			gameState:SetAttribute("Wave", waveNumber)
-			gameState:SetAttribute("Status", "เวฟ " .. waveNumber .. " กำลังมา!")
+			gameState:SetAttribute("Status", "เวฟ " .. waveNumber .. "/" .. totalWaves .. (waveNumber > 10 and " — ศัตรูเลือกเส้นทางตามแนวป้องกัน!" or waveNumber > 5 and " — หลายจุดเกิด!" or " กำลังมา!"))
 			for _, group in groups do
 				for _ = 1, math.ceil(group.Count * countMultiplier) do
 					if gameState:GetAttribute("BaseHealth") <= 0 or gameState:GetAttribute("PlayerCount") <= 0 then break end
-					local enemy, data, altitude = createEnemy(group.Type, healthMultiplier)
-					activeMoves[enemy] = { Waypoint = 2, Speed = data.Speed, BaseDamage = data.BaseDamage, Altitude = altitude }
+					spawnSequence += 1
+					local routeIndex = Routes.Choose(activePaths, waveNumber, Config.Enemies[group.Type].Movement, towers, Config, spawnSequence)
+					local path = activePaths[routeIndex]
+					local enemy, data, altitude = createEnemy(group.Type, healthMultiplier * (1 + math.max(0, waveNumber-5)*0.08), path, routeIndex)
+					activeMoves[enemy] = { Path = path, Waypoint = 2, Speed = data.Speed, BaseDamage = data.BaseDamage, Altitude = altitude }
 					task.wait(group.Spacing)
 				end
 			end
 			repeat task.wait(0.5) until #enemies:GetChildren() == 0 or gameState:GetAttribute("BaseHealth") <= 0 or gameState:GetAttribute("PlayerCount") <= 0
-			if waveNumber < #Config.Waves and gameState:GetAttribute("BaseHealth") > 0 then
+			if waveNumber < totalWaves and gameState:GetAttribute("BaseHealth") > 0 then
 				for seconds = Config.TimeBetweenWaves, 1, -1 do gameState:SetAttribute("Status", "เวฟถัดไปใน " .. seconds .. " วินาที") task.wait(1) end
 			end
 		end
