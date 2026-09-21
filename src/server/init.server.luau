@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local Config = require(ReplicatedStorage.Shared.GameConfig)
+local TowerVisuals = require(ReplicatedStorage.Shared.TowerVisuals)
 
 local function newInstance(className, name, parent)
 	local instance = Instance.new(className)
@@ -188,6 +189,10 @@ local function attack(runtime, target, origin, owner)
 	if not target.PrimaryPart then return end
 	local targetPosition = target.PrimaryPart.Position
 	showShot(origin, targetPosition, runtime.Color)
+	TowerVisuals.Pulse(origin, runtime.Color, 0.9 + (runtime.VisualLevel or 1) * 0.25)
+	if runtime.SplashRadius or runtime.SlowMultiplier then
+		TowerVisuals.Pulse(targetPosition, runtime.Color, runtime.SplashRadius and 5 or 3)
+	end
 	damageEnemy(target, runtime.Damage, owner)
 	if runtime.SplashRadius then
 		for _, other in enemies:GetChildren() do
@@ -224,6 +229,12 @@ local function createTower(position, owner, towerType, towerData)
 	local runtime = table.clone(towerData)
 	towerRuntime[model] = runtime
 	model.PrimaryPart, model.Parent = pedestal, towers
+	local visual = TowerVisuals.Build(model, head, towerType, towerData.Color, 1)
+	model:GetAttributeChangedSignal("Level"):Connect(function()
+		runtime.VisualLevel = model:GetAttribute("Level")
+		visual = TowerVisuals.Build(model, head, towerType, towerData.Color, runtime.VisualLevel)
+		TowerVisuals.Pulse(head.Position, towerData.Color, 8)
+	end)
 	owner:SetAttribute("TowersPlaced", (owner:GetAttribute("TowersPlaced") or 0) + 1)
 
 	task.spawn(function()
@@ -241,7 +252,8 @@ local function createTower(position, owner, towerType, towerData)
 				local flatTarget = Vector3.new(targetPosition.X, head.Position.Y, targetPosition.Z)
 				head.CFrame = CFrame.lookAt(head.Position, flatTarget)
 				for _, barrelInfo in barrels do barrelInfo.Part.CFrame = head.CFrame * CFrame.new(barrelInfo.Offset, 0, -2.5) end
-				attack(runtime, target, head.Position, owner)
+				visual:Aim()
+				attack(runtime, target, visual:Muzzle(), owner)
 			end
 			task.wait(runtime.Cooldown)
 		end
